@@ -1,0 +1,12 @@
+# Environment secrets
+.env
+
+# Python cache and local tooling
+__pycache__/
+*.py[cod]
+
+# Generated Excel workbooks and uploaded mappings
+*.xlsx
+
+# Generated dashboard snapshots and refresh status
+dashboard_cache/*.json
