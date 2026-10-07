@@ -50,25 +50,19 @@ and no longer imports `run_pipeline.py`. Data goes into ONE `DATA_Combined` tab 
   from actually generating a report, which always re-downloads fresh data). Blocks with an error if
   `EXCEL.EXE` is already running, since a workbook left open elsewhere can get silently closed by the
   automation.
-- **`run_pipeline.py`** — **not legacy**, `build_report.py` imports shared pieces from it (`download_all`,
-  `load_csv`, `normalize_value`, `dataframe_to_rows`, the CSV/date-column constants). It also still works
-  standalone as the *old* template-cloning pipeline (`split_and_update()`), kept for reference/fallback,
-  but nothing currently calls that path. AWS credentials are hardcoded inline here rather than sourced
-  from environment variables.
 
-## Legacy / superseded scripts
+## Removed legacy code
 
-`download_flat.py`, `download_and_convert.py`, `split_and_update.py`, `convert_to_dynamic_tables.py`,
-`refresh_pivots.py`, `finalize.py`, `inspect_5613.py`, `fix_pivot_ranges.py` — all predate the
-build-from-scratch architecture and are not part of the current pipeline. Not deleted yet; ask before
-relying on or removing them.
+The old S3 / template-cloning scripts (`run_pipeline.py`, `download_*.py`, `split_and_update.py`,
+`convert_to_dynamic_tables.py`, `refresh_pivots.py`, `finalize.py`, `inspect_5613.py`, `fix_pivot_ranges.py`)
+and the S3 CSV extracts were deleted. Nothing depends on S3 anymore.
 
 ## Known gotchas hit during development (avoid re-introducing)
 
 - **pywin32 bulk-array datetime write is timezone-buggy.** Writing a naive Python `datetime`/`pd.Timestamp`
   via a 2D `Range.Value = [[...]]` COM array assignment silently shifts it by the local timezone offset
   (observed: -5:30 for IST), often rolling the date back a full day. Fix in place: `normalize_value()` in
-  `run_pipeline.py` converts timestamps to Excel serial-date floats (`(v - pd.Timestamp('1899-12-30')).total_seconds()/86400`)
+  `build_report.py` converts timestamps to Excel serial-date floats (`(v - pd.Timestamp('1899-12-30')).total_seconds()/86400`)
   instead of passing datetime objects, then an explicit `NumberFormat` is applied to the cells. This bug
   silently corrupted every date column in every workbook for a period during development before being
   caught — if date values ever look off by ~1 day again, check this first.
