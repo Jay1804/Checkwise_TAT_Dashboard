@@ -4,58 +4,82 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Not a software project — a data pipeline / working folder for producing per-client "Check TAT Analysis"
-Excel reports from raw case-check data pulled live from the checkpoint_live MySQL database. There is no build, lint, or test suite; scripts are
-run ad hoc with `python <script>.py`, or via the Streamlit UI (`streamlit run streamlit_app.py`).
+Not a software project — a data pipeline for producing per-client "Check TAT Analysis" Excel reports from
+case-check data pulled **live from the `checkpoint_live` MySQL database**. There is no build, lint, or test
+suite; run it via the Streamlit UI (`streamlit run streamlit_app.py`) or `python build_report.py <client_id>
+[YYYY-MM-DD YYYY-MM-DD]`. There is **no S3 dependency** anymore.
 
-Each client's workbook is now built **entirely from scratch** out of the live database data on every run —
-there is no template `.xlsx` the pipeline depends on or clones. This was a deliberate architecture change:
-the old template-cloning approach (see "Legacy / superseded scripts" below) kept failing when the template
-file went missing (repeatedly disappeared during this project's development — see git-less history/
-conversation for details — with no definitive root cause found; suspected antivirus/EDR reacting to heavy
-Excel COM automation, though never confirmed). Building fresh each time removes that single point of failure.
+Each client's workbook is built **entirely from scratch** on every run — there is no template `.xlsx` to
+clone. (The old template-cloning approach kept failing when the template file went missing; suspected
+antivirus/EDR reacting to heavy Excel COM automation, never confirmed. Building fresh removes that single
+point of failure.)
 
-Dependencies are pinned in `requirements.txt`: `pandas`, `numpy`, `pymysql`, `python-dotenv` (pyarrow no longer needed)
-`pywin32`, `streamlit`. The COM automation
-steps require a real, licensed Microsoft Excel installation on the machine — `openpyxl` alone cannot
-create/refresh PivotTables, it only reads/writes the underlying XML.
+Dependencies are in `requirements.txt`: `pandas`, `numpy`, `pymysql`, `python-dotenv`, `pywin32`, `streamlit`.
+The COM steps require a real, licensed Microsoft Excel on Windows — `openpyxl` alone cannot create/refresh
+PivotTables.
 
 ## Current pipeline
 
-**Data source (default): live MySQL `checkpoint_live`**, credentials in `.env` (`DB_*`, never hardcode). `db_source.py`
-runs `sql_queries.QUERY_BASE_DATA` (one client at a time - never remove the client filter, unfiltered scans are
-impractically slow) and `tat_logic.py` computes the Flat/Recal due date/ageing/bucket/IT-OT columns in pandas
-(copied from `Streamlit_app/modules/checkwise_tat_dashboard/vendor/`; keep in sync). Output matches the legacy S3 CSVs
-to within a handful of still-open checks whose ageing moves with "today". There is no S3 dependency anymore: `build_report.py` is self-contained
-and no longer imports `run_pipeline.py`. Data goes into ONE `DATA_Combined` tab (Flat + Recal columns joined on `case_check_id`);
-`Flat_summary`/`Recal_summary` both pivot off `tblDataCombined`.
+```
+checkpoint_live (MySQL) --db_source.py + sql_queries.py--> raw per-check rows --tat_logic.py--> Flat/Recal dataframes
+                                                                                  --build_report.py (Excel COM)--> workbook
+                                                                                  <-- streamlit_app.py (UI)
+```
 
-- **`build_report.py`** — the pipeline. `main()` downloads the latest data and builds a workbook for every
-  `client_external_id` found. `build_reports_for_clients(client_ids, date_from, date_to)` builds one workbook per selected
-  client, optionally filtered to a `received_date` range — this is what the Streamlit app calls.
-  For each client it creates a **brand-new** workbook via Excel COM (`excel.Workbooks.Add()`) with:
-  - `DATA_Flat` / `DATA_Recal` — that client's rows as real Excel Tables (`tblDataFlat`/`tblDataRecal`),
-    bold+frozen header row, date columns formatted `dd-mm-yyyy`.
-  - `Flat_summary` / `Recal_summary` — for each of Flat and Recal: an "IT vs OT by month" pivot (row field
-    is a computed `received_month` column, first-of-month date formatted `mmm'yy` so it displays as
-    `Jan'25` but still sorts chronologically) with manual `IT %`/`OT %` ratio columns including the Grand
-    Total row (pivots don't support cross-column ratios natively), plus ageing-bucket and
-    severity breakdowns (count + % of row) by check type. Ageing buckets are forced into a fixed custom
-    order via `PivotItem.Position` (`AGEING_BUCKET_ORDER`), not Excel's default alphabetical order.
-    Every pivot section is styled as a self-contained "card": full-width merged/centered title bar,
-    shaded bold header rows, bold Grand Total row, full grid borders, sheet tab colors, gridlines off.
-- **`streamlit_app.py`** — UI over `build_report.py`. Lets the user type a `client_external_id` and pick a
-  date range, shows a live log during generation, and offers a download button for the resulting file. It
-  also previews available client IDs / date range from whatever was last downloaded locally (separate
-  from actually generating a report, which always re-downloads fresh data). Blocks with an error if
-  `EXCEL.EXE` is already running, since a workbook left open elsewhere can get silently closed by the
-  automation.
+- **`db_source.py`** — connects using `.env` (`DB_HOST/PORT/NAME/USER/PASSWORD`; never hardcode). `fetch_flat_recal(client_ids,
+  date_from, date_to)` runs `QUERY_BASE_DATA` for the given clients in one query and returns `(flat_df, recal_df)`;
+  `available_clients()` feeds the UI picker. **Never remove the client filter** — an unfiltered scan across all
+  clients is impractically slow.
+- **`sql_queries.py` / `tat_logic.py`** — raw-field SQL and the pandas Flat/Recal due-date / ageing / bucket / IT-OT
+  logic. Copied from `Streamlit_app/modules/checkwise_tat_dashboard/vendor/`; keep in sync. The one place TAT
+  logic is defined — reuse, don't reimplement. Output matched the old S3 CSVs for client 5613 except a few dozen
+  still-open checks whose ageing moves with "today" (plus new cases since the CSV snapshot).
+- **`build_report.py`** — `build_reports_for_clients(client_ids, date_from, date_to, progress_callback)` fetches all
+  selected clients in one query, then builds one workbook per client in a single shared Excel session (a client
+  with no rows or a failed build is reported via `error`, not fatal). Each workbook has:
+  - `DATA_Combined` — ONE data tab (Excel Table `tblDataCombined`): Flat and Recal rows joined on
+    `case_check_id` (outer join) — shared columns once, then the Flat-only columns, then the Recal-only columns.
+    Bold+frozen header, dates formatted `dd-mm-yyyy`.
+  - `Flat_summary` / `Recal_summary` — two separate summary tabs, both pivoting off `tblDataCombined` (Flat uses
+    the `*_flat` columns, Recal the others). Each has an "IT vs OT by month" pivot (row field is a computed
+    `received_month` first-of-month date shown as `mmm'yy`) with manual `IT %`/`OT %` columns incl. Grand Total,
+    plus ageing-bucket and severity breakdowns (count + % of row) by check type. Ageing buckets use a fixed
+    custom order via `PivotItem.Position` (`AGEING_BUCKET_ORDER`). Each pivot is a styled "card" (merged title
+    bar, shaded headers, bold Grand Total, grid borders, tab colors, gridlines off).
+- **`streamlit_app.py`** — UI. A searchable multi-select of clients (labels `"<client_external_id> - <company name>"`,
+  so type an ID or a name), a date range (filters `received_date`), live log + progress bar, and one download
+  button per generated client (results persisted in `st.session_state`, since a download click reruns the
+  script). Blocks with an error if `EXCEL.EXE` is already running, since a workbook left open elsewhere can be
+  silently closed by the automation.
 
 ## Removed legacy code
 
 The old S3 / template-cloning scripts (`run_pipeline.py`, `download_*.py`, `split_and_update.py`,
-`convert_to_dynamic_tables.py`, `refresh_pivots.py`, `finalize.py`, `inspect_5613.py`, `fix_pivot_ranges.py`)
-and the S3 CSV extracts were deleted. Nothing depends on S3 anymore.
+`convert_to_dynamic_tables.py`, `refresh_pivots.py`, `finalize.py`, `inspect_5613.py`, `fix_pivot_ranges.py`),
+the S3 CSV extracts and old generated workbooks were deleted. They contained hardcoded AWS credentials —
+rotate those keys if still active.
+
+## Deployment (planned — server not yet available)
+
+Not deployed yet; this will be deployed to a server once it is up and running. Constraints to plan around:
+
+- **Needs Windows + licensed Microsoft Excel** (COM automation via `pywin32`). It will NOT run on Linux, Docker,
+  Streamlit Community Cloud or typical PaaS. The target server must be a Windows machine/VM with Excel installed.
+- **Single-user / one job at a time.** The app refuses to generate if any `EXCEL.EXE` is running and force-kills a
+  lingering one afterwards, so concurrent users would clash. Don't run other Excel work on the same server
+  (or under the same session) as the app.
+- **Linux alternative if Windows is not possible:** replace the Excel pivots with pre-computed summary tables
+  written via `openpyxl`/`xlsxwriter` (static tables instead of refreshable pivots). The sibling project
+  `checkwise_tat_dashboard` has a `linux_report.py` that may already do this.
+- **Before go-live:**
+  - Rotate the DB password (it was shared in chat) and use a read-only DB user.
+  - Allowlist the server's IP on the RDS security group (`ab-mum-prod-bridge...ap-south-1.rds.amazonaws.com:3306`).
+  - Provide `DB_*` via server environment variables / secrets rather than a checked-in or copied `.env`
+    (`.env` is gitignored; `.env.example` lists the names).
+  - Put authentication/network restriction (VPN/internal only) in front of the Streamlit app — it has no login.
+  - Run as a service (e.g. NSSM/Task Scheduler) with a fixed port, and make sure the service account can launch Excel.
+  - Do a full end-to-end run (Excel build included) and compare numbers against a trusted report — the full
+    workbook build against the DB source has not been verified yet, only the DB fetch.
 
 ## Known gotchas hit during development (avoid re-introducing)
 
